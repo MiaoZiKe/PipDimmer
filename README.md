@@ -203,6 +203,12 @@ PipDimmer.exe -log
 
 ---
 
+## 測試與 CI
+
+`tests/Validate-Ahk.ps1` 驗證 AHK 語法與初始化；GitHub Actions 必須通過這兩項才會發布。`tests/Run-Tests.ps1` 在互動桌面測試兩個版本的滾輪、修飾鍵、透明度下限、滑鼠穿透與退出還原。執行前需正常結束 PipDimmer；測試會保存並還原使用者設定與記錄。詳見 [tests/README.md](tests/README.md)。
+
+---
+
 ## 已知限制
 
 - 提權（系統管理員）視窗無法調整，也收不到它上面的滑鼠事件——這是 Windows UIPI 的設計。

@@ -45,26 +45,27 @@ jobs:
           if ($committed -ne $fresh) {
             Write-Host "::warning::PipDimmer.exe in the repo looks stale - run build.ps1 and commit the result"
           } else {
-            Write-Host "committed binary matches a fresh build of src/"
+            Write-Host "committed binary has the same size as a fresh build (contents are not compared)"
           }
 
-      - name: Validate the AutoHotkey script
+      - name: Download AutoHotkey
         shell: pwsh
-        continue-on-error: true    # a download hiccup must not fail the build
         run: |
           # Downloading the official zip is more predictable than a package manager: it needs
           # no install step and the layout is known.
           $ver = '2.0.19'
           $zip = Join-Path $env:RUNNER_TEMP 'ahk.zip'
           $dir = Join-Path $env:RUNNER_TEMP 'ahk'
-          Invoke-WebRequest "https://www.autohotkey.com/download/2.0/AutoHotkey_$ver.zip" -OutFile $zip
+          Invoke-WebRequest "https://github.com/AutoHotkey/AutoHotkey/releases/download/v$ver/AutoHotkey_$ver.zip" -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5
           Expand-Archive $zip -DestinationPath $dir -Force
           $exe = Get-ChildItem $dir -Recurse -Filter 'AutoHotkey64.exe' | Select-Object -First 1
           if (-not $exe) { throw "AutoHotkey64.exe not found in the downloaded zip" }
-          $p = Start-Process $exe.FullName -ArgumentList '/ErrorStdOut', '/validate', 'ahk\PipDimmer.ahk' `
-                 -NoNewWindow -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "AutoHotkey reported a syntax error (exit $($p.ExitCode))" }
-          Write-Host "PipDimmer.ahk syntax OK (AutoHotkey $ver)"
+          "AHK_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+
+      - name: Validate AutoHotkey syntax and initialization
+        shell: pwsh
+        timeout-minutes: 2
+        run: .\tests\Validate-Ahk.ps1 -AhkExePath $env:AHK_EXE
 
       - uses: actions/upload-artifact@v7
         with:

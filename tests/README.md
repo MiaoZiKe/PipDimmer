@@ -6,8 +6,20 @@
 .\tests\Run-Tests.ps1 -Only ahk    # PipDimmer.ahk only
 ```
 
-需要 Google Chrome。`-Only ahk` 另需 AutoHotkey v2；沒裝就會自動跳過那一輪。
-先跑過 `.\build.ps1`（測試會用 repo 根目錄的 `PipDimmer.exe`）。
+需要 Google Chrome。`-Only ahk` 必須有 AutoHotkey v2，缺少時會失敗；預設的雙版本測試在缺少 AHK 時會明確列為跳過。可用 `-AhkExePath` 指定 portable 版本。
+測試 C# 版前先跑 `.\build.ps1`（使用 repo 根目錄的 `PipDimmer.exe`）；`-Only ahk` 不需要 C# 執行檔。
+
+執行前請從系統匣正常結束 PipDimmer。測試偵測到任一版本正在執行時會直接中止，不會強制關閉你的程式。測試會顯示專用 Chrome 視窗、移動滑鼠；結束後還原游標、修飾鍵，以及 `settings.ini` / `log.txt` 的原始內容（原本不存在的檔案也會恢復為不存在）。測試只清理自己啟動的程序與唯一的暫存 Chrome profile。
+
+## CI 與不操作滑鼠的檢查
+
+```powershell
+.\tests\Validate-Ahk.ps1 -AhkExePath 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe'
+```
+
+這會先執行 `/validate`，再以 `--self-test` 檢查實際的 OSD 與系統匣選單初始化；不讀寫使用者設定、不啟動透明度控制、不掃描或修改其他視窗。驗證器使用 `/force` 避免取代已在執行的 AHK 實例。每個程序最多執行 30 秒，語法錯誤、初始化錯誤或逾時都會失敗。
+
+GitHub Actions 從 AutoHotkey 官方 GitHub Release 下載固定版本 2.0.19，並執行相同驗證器。下載失敗與驗證失敗都會阻擋 build / release。完整滑鼠測試仍需互動桌面，未加入 GitHub CI。
 
 ---
 

@@ -211,6 +211,10 @@ It asserts the step arithmetic, the opacity floor, that returning to 100% clears
 while `Ctrl+Shift`+wheel is captured, and that a ghosted window is still reachable by the
 wheel.
 
+Close PipDimmer before running the interactive suite. It refuses to replace running instances and restores settings and logs after testing. `-Only ahk` requires AutoHotkey v2; use `-AhkExePath` for a portable interpreter.
+
+CI downloads AutoHotkey 2.0.19 from the official GitHub release and runs `tests/Validate-Ahk.ps1` for syntax and isolated OSD/tray initialization checks. Download or validation failures block the build and release. The mouse-driven suite requires an interactive desktop and is run separately.
+
 See [tests/README.md](tests/README.md).
 
 ---

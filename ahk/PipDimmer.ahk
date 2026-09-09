@@ -92,6 +92,19 @@ global ShellClasses := ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryT
                       , "NotifyIconOverflowWindow", "MultitaskingViewFrame"]
 
 ; ============================================================== 啟動 =======
+; CI checks the real GUI/menu initialization without running the controller or reading/writing user settings.
+if (A_Args.Length = 1 && A_Args[1] = "--self-test") {
+    try {
+        BuildOsd()
+        BuildTray()
+        FileAppend "PipDimmer AHK initialization OK`n", "*", "UTF-8"
+    } catch as err {
+        FileAppend "Initialization failed: " err.Message " (line " err.Line ")`n", "*", "UTF-8"
+        ExitApp 1
+    }
+    ExitApp 0
+}
+
 LoadCfg()
 BuildOsd()
 BuildTray()
@@ -661,7 +674,7 @@ GrabInfo() {
         return
     }
 
-    isPip := IsPip(hwnd)
+    pipDetected := IsPip(hwnd)
     msg := "游標位置    : " mx ", " my "`n"
         . "HWND        : 0x" Format("{:X}", hwnd) "`n"
         . "類別        : " cls "`n"
@@ -674,9 +687,9 @@ GrabInfo() {
         . "LAYERED     : " ((ex & EX_LAYERED) ? "是" : "否") "`n"
         . "TRANSPARENT : " ((ex & EX_TRANSPARENT) ? "是（滑鼠穿透）" : "否") "`n"
         . "目前透明度  : " Round(CurrentAlpha(hwnd) * 100 / 255) "%`n`n"
-        . "判定為子母畫面：" (isPip ? "是（滾輪可直接調整）" : "否（需按住 Ctrl 才能調整）")
+        . "判定為子母畫面：" (pipDetected ? "是（滾輪可直接調整）" : "否（修飾鍵：" ModName(CFG["ModifierMask"]) "）")
 
-    if !isPip {
+    if !pipDetected {
         msg .= "`n`n未判定為子母畫面的可能原因："
         if (cls != "Chrome_WidgetWin_1")
             msg .= "`n  · 視窗類別不是 Chrome_WidgetWin_1"

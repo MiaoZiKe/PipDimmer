@@ -9,7 +9,7 @@
 # system ANSI codepage, which turns non-ASCII characters into mojibake and breaks parsing.
 
 $script:FixtureHtml = Join-Path $PSScriptRoot 'pip_fixture.html'
-$script:ProfileDir  = Join-Path $env:TEMP 'PipDimmerTestProfile'
+$script:ProfileDir  = Join-Path $env:TEMP ('PipDimmerTestProfile-' + [guid]::NewGuid().ToString('N'))
 $script:FixtureProc = $null
 
 function Find-Chrome {
@@ -122,7 +122,7 @@ if (-not ('Fix' -as [type])) { Add-Type -TypeDefinition $fixCode -Language CShar
 function Get-FixturePids {
     $p = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
          Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script:ProfileDir) }
-    return @($p | ForEach-Object { [uint32]$_.ProcessId })
+    return ,@($p | ForEach-Object { [uint32]$_.ProcessId })
 }
 
 function Start-PipFixture {
@@ -130,15 +130,15 @@ function Start-PipFixture {
     if (-not (Test-Path $script:FixtureHtml)) { throw "missing fixture page: $($script:FixtureHtml)" }
 
     $chromeArgs = @(
-        "--user-data-dir=$script:ProfileDir"
+        '--user-data-dir="' + $script:ProfileDir + '"'
         '--no-first-run'
         '--no-default-browser-check'
         '--disable-features=Translate,OptimizationGuideModelDownloading'
         '--window-position=120,120'
         '--window-size=760,520'
-        "--app=file:///$($script:FixtureHtml -replace '\\','/')"
+        '--app="' + ([uri]$script:FixtureHtml).AbsoluteUri + '"'
     )
-    $script:FixtureProc = Start-Process -FilePath $chrome -ArgumentList $chromeArgs -PassThru
+    $script:FixtureProc = Start-Process -FilePath $chrome -ArgumentList $chromeArgs -WindowStyle Normal -PassThru
     Start-Sleep -Seconds 5
 
     $page = [Fix]::Find((Get-FixturePids), $false)
@@ -180,5 +180,12 @@ function Stop-PipFixture {
     $left = @(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
               Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script:ProfileDir) })
     Write-Host ("fixture chrome processes left: " + $left.Count)
-    Remove-Item $script:ProfileDir -Recurse -Force -ErrorAction SilentlyContinue
+    $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
+    $profilePath = [IO.Path]::GetFullPath($script:ProfileDir)
+    if (-not $profilePath.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $profilePath) -notmatch '^PipDimmerTestProfile-[0-9a-f]{32}$') {
+        throw "Refusing to delete unexpected fixture path: $profilePath"
+    }
+    if ($left.Count) { throw "Fixture Chrome is still running; keeping $profilePath" }
+    if (Test-Path -LiteralPath $profilePath) { Remove-Item -LiteralPath $profilePath -Recurse -Force }
 }

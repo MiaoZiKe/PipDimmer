@@ -13,7 +13,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('both', 'cs', 'ahk')]
-    [string]$Only = 'both'
+    [string]$Only = 'both',
+    [string]$AhkExePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,12 +29,32 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'PipFixture.ps1')
 
 function Find-AutoHotkey {
+    if ($AhkExePath) {
+        if (-not (Test-Path -LiteralPath $AhkExePath -PathType Leaf)) {
+            throw "AutoHotkey executable not found at $AhkExePath"
+        }
+        return (Resolve-Path -LiteralPath $AhkExePath).Path
+    }
     $c = @(
         (Join-Path $env:ProgramFiles 'AutoHotkey\v2\AutoHotkey64.exe')
         (Join-Path $env:LOCALAPPDATA 'Programs\AutoHotkey\v2\AutoHotkey64.exe')
     )
     foreach ($p in $c) { if ($p -and (Test-Path $p)) { return $p } }
     return $null
+}
+
+# Check before changing settings, opening fixture windows, or sending input.
+if ($Only -ne 'ahk' -and -not (Test-Path -LiteralPath $csExe -PathType Leaf)) {
+    throw "PipDimmer.exe not found at $csExe -- run build.ps1 first"
+}
+$ahkExe = if ($Only -ne 'cs') { Find-AutoHotkey } else { $null }
+if ($Only -eq 'ahk' -and -not $ahkExe) {
+    throw 'AutoHotkey v2 is required for -Only ahk; install it or specify -AhkExePath.'
+}
+$running = @(Get-CimInstance Win32_Process -Filter "Name='PipDimmer.exe' OR Name LIKE 'AutoHotkey%.exe'" |
+    Where-Object { $_.Name -eq 'PipDimmer.exe' -or $_.CommandLine -match 'PipDimmer\.ahk(?:["\s]|$)' })
+if ($running.Count) {
+    throw "PipDimmer is already running (PID $($running.ProcessId -join ', ')). Close it before running the suite."
 }
 
 $harness = @'
@@ -46,6 +67,7 @@ using System.Runtime.InteropServices;
 
 public class H {
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   delegate bool EnumWindowsProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
@@ -152,10 +174,19 @@ public class H {
   public static bool Ghosted(IntPtr h) { return (((int)(long)GetWLP(h,-20)) & WS_EX_TRANSPARENT) != 0; }
   public static string Ex(IntPtr h) { return string.Format("0x{0:X8}", (int)(long)GetWLP(h,-20)); }
 
-  public static IntPtr CsMsgWindow() { return FindWindowExW(new IntPtr(-3), IntPtr.Zero, null, "PipDimmerMsgWindow"); }
-  public static IntPtr AhkWindow() {
+  public static IntPtr CsMsgWindow(uint wantPid) {
+    IntPtr h = IntPtr.Zero;
+    while ((h = FindWindowExW(new IntPtr(-3), h, null, "PipDimmerMsgWindow")) != IntPtr.Zero) {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid == wantPid) return h;
+    }
+    return IntPtr.Zero;
+  }
+  public static IntPtr AhkWindow(uint wantPid) {
     IntPtr found = IntPtr.Zero;
     EnumWindows(delegate(IntPtr h, IntPtr l) {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid != wantPid) return true;
       var cb = new StringBuilder(64); GetClassNameW(h, cb, 64);
       if (cb.ToString() != "AutoHotkey") return true;
       var tb = new StringBuilder(512); GetWindowTextW(h, tb, 512);
@@ -166,7 +197,9 @@ public class H {
   }
   // Both editions quit cleanly on WM_CLOSE to their control window, which runs the same
   // restore path as the tray "quit" item.
-  public static void CloseApp(IntPtr h) { PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+  public static void CloseApp(IntPtr h) {
+    if (h != IntPtr.Zero) PostMessageW(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
+  }
 }
 '@
 if (-not ('H' -as [type])) {
@@ -192,11 +225,26 @@ function HookCounters {
     return $null
 }
 
+function Stop-TestApp {
+    param([System.Diagnostics.Process]$Process, [string]$Edition, [switch]$Force)
+    if (-not $Process -or $Process.HasExited) { return }
+    $window = if ($Edition -eq 'cs') { [H]::CsMsgWindow($Process.Id) } else { [H]::AhkWindow($Process.Id) }
+    [H]::CloseApp($window)
+    if (-not $Process.WaitForExit(5000)) {
+        if (-not $Force) { throw "$Edition edition did not exit after WM_CLOSE." }
+        # The Process object identifies only the instance started by this test run.
+        Stop-Process -InputObject $Process -Force -ErrorAction Stop
+        if (-not $Process.WaitForExit(5000)) { throw "Could not stop test process $($Process.Id)." }
+    }
+}
+
 function Invoke-Suite {
     param($Label, $Pip, $Probe, $ProbeX, $ProbeY, [scriptblock]$Start, [scriptblock]$Stop, [bool]$HasLog)
 
     Write-Host ""
     Write-Host "===== $Label =====" -ForegroundColor Cyan
+    $pipExBefore = [H]::Ex($Pip)
+    $probeExBefore = [H]::Ex($Probe)
     & $Start
     Start-Sleep -Seconds 3
 
@@ -221,7 +269,7 @@ function Invoke-Suite {
 
     Wheel 40 1 40
     Start-Sleep -Milliseconds 1200
-    Check "PiP: 100% clears WS_EX_LAYERED" (([H]::Ex($Pip)) -eq '0x00200108') "ex=$([H]::Ex($Pip))"
+    Check "PiP: 100% restores original extended style" (([H]::Ex($Pip)) -eq $pipExBefore) "ex=$([H]::Ex($Pip)), expected $pipExBefore"
 
     # ---------- some other window: modifier gating ----------
     [H]::Raise($ProbeX, $ProbeY)
@@ -284,20 +332,25 @@ function Invoke-Suite {
     & $Stop
     Start-Sleep -Seconds 2
     Check "clean exit restores every window it touched" `
-          (([H]::Alpha($Probe)) -eq 255 -and -not [H]::Ghosted($Probe) -and ([H]::Ex($Pip)) -eq '0x00200108') `
+          (([H]::Alpha($Probe)) -eq 255 -and ([H]::Ex($Probe)) -eq $probeExBefore -and ([H]::Ex($Pip)) -eq $pipExBefore) `
           "probe ex=$([H]::Ex($Probe))  pip ex=$([H]::Ex($Pip))"
 }
 
 # ---------------------------------------------------------------- run ------
-if (-not (Test-Path $csExe)) { throw "PipDimmer.exe not found at $csExe -- run build.ps1 first" }
-$ahkExe = Find-AutoHotkey
-
-Remove-Item $ini, $log -Force -ErrorAction SilentlyContinue
-Get-Process PipDimmer -ErrorAction SilentlyContinue | Stop-Process -Force
+# Preserve exact bytes (including encoding) and absence, even when a test fails.
+$settingsBackup = @(foreach ($path in @($ini, $log)) {
+    $existed = Test-Path -LiteralPath $path -PathType Leaf
+    @{ Path = $path; Existed = $existed; Bytes = if ($existed) { ,([IO.File]::ReadAllBytes($path)) } else { $null } }
+})
+$script:csProcess = $null
+$script:ahkProcess = $null
 
 $probeX = 300; $probeY = 620
 $saved = [H]::Cursor()
 try {
+    foreach ($path in @($ini, $log)) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
     $pip = Start-PipFixture
     [H]::StartProbe($probeX, $probeY)
     $probe = [H]::FormHandle
@@ -305,10 +358,12 @@ try {
 
     if ($Only -eq 'both' -or $Only -eq 'cs') {
         Invoke-Suite -Label 'C# edition (PipDimmer.exe)' -Pip $pip -Probe $probe -ProbeX $probeX -ProbeY $probeY `
-            -Start { Start-Process $csExe -ArgumentList '-log' | Out-Null } `
-            -Stop  { [H]::CloseApp([H]::CsMsgWindow()) } `
+            -Start { $script:csProcess = Start-Process $csExe -ArgumentList '-log' -WindowStyle Hidden -PassThru } `
+            -Stop  { Stop-TestApp $script:csProcess 'cs' } `
             -HasLog $true
-        Remove-Item $ini, $log -Force -ErrorAction SilentlyContinue
+        foreach ($path in @($ini, $log)) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        }
     }
 
     if ($Only -eq 'both' -or $Only -eq 'ahk') {
@@ -317,8 +372,8 @@ try {
             Write-Host "===== AutoHotkey edition: SKIPPED (AutoHotkey v2 not installed) =====" -ForegroundColor Yellow
         } else {
             Invoke-Suite -Label 'AutoHotkey edition (PipDimmer.ahk)' -Pip $pip -Probe $probe -ProbeX $probeX -ProbeY $probeY `
-                -Start { Start-Process $ahkExe -ArgumentList "`"$ahkScr`"" | Out-Null } `
-                -Stop  { [H]::CloseApp([H]::AhkWindow()) } `
+                -Start { $script:ahkProcess = Start-Process $ahkExe -ArgumentList "/ErrorStdOut `"$ahkScr`"" -WindowStyle Hidden -PassThru } `
+                -Stop  { Stop-TestApp $script:ahkProcess 'ahk' } `
                 -HasLog $false
         }
     }
@@ -328,13 +383,24 @@ catch {
     $script:fail++
 }
 finally {
+    [H]::ShiftUp()
+    [H]::CtrlUp()
+    foreach ($edition in @('cs', 'ahk')) {
+        $testProcess = if ($edition -eq 'cs') { $script:csProcess } else { $script:ahkProcess }
+        try { Stop-TestApp $testProcess $edition -Force }
+        catch { $script:fail++; Write-Host "Cleanup failed: $($_.Exception.Message)" -ForegroundColor Red }
+    }
     [H]::PutCursor($saved.X, $saved.Y)
     [H]::StopProbe()
-    Get-Process PipDimmer -ErrorAction SilentlyContinue | Stop-Process -Force
-    Get-CimInstance Win32_Process -Filter "Name='AutoHotkey64.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like '*PipDimmer.ahk*' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Stop-PipFixture
+    try { Stop-PipFixture }
+    catch { $script:fail++; Write-Host "Fixture cleanup failed: $($_.Exception.Message)" -ForegroundColor Red }
+    foreach ($backup in $settingsBackup) {
+        try {
+            if ($backup.Existed) { [IO.File]::WriteAllBytes($backup.Path, [byte[]]$backup.Bytes) }
+            elseif (Test-Path -LiteralPath $backup.Path) { Remove-Item -LiteralPath $backup.Path -Force }
+        }
+        catch { $script:fail++; Write-Host "Could not restore $($backup.Path): $($_.Exception.Message)" -ForegroundColor Red }
+    }
     Write-Host ""
     Write-Host "TOTAL: $($script:pass) passed, $($script:fail) failed" `
         -ForegroundColor $(if ($script:fail -eq 0) { 'Green' } else { 'Red' })
