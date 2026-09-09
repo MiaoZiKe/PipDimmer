@@ -1,0 +1,15 @@
+# Normalise text in the repo, check out CRLF on Windows.
+* text=auto eol=crlf
+
+# Never let line-ending conversion near a binary.
+*.exe binary
+*.dll binary
+*.png binary
+*.ico binary
+
+# Diffs of the executable are noise; mark it so `git diff` says "binary" instead of trying.
+PipDimmer.exe -diff
+
+# GitHub language stats: this is a C# tool with an AutoHotkey port, not a PowerShell project.
+tests/* linguist-vendored
+build.ps1 linguist-vendored

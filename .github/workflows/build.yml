@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed only by the release job
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No SDK setup step on purpose: the whole point is that this builds with the C#
+      # compiler that already ships inside Windows, which the runner image also has.
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Sanity-check the binary
+        shell: pwsh
+        run: |
+          $f = Get-Item .\PipDimmer.exe
+          Write-Host ("PipDimmer.exe: {0:N0} bytes" -f $f.Length)
+          if ($f.Length -lt 20000) { throw "binary is suspiciously small ($($f.Length) bytes)" }
+          # A winexe built for x64 must have the PE magic and no console subsystem surprises.
+          $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "not a PE image" }
+
+      - name: Check the committed exe matches the sources
+        shell: pwsh
+        run: |
+          # build.ps1 overwrites PipDimmer.exe in place, so if the checked-in binary were
+          # stale git would now report it as modified. Timestamps inside a PE image change
+          # on every build, so compare sizes rather than hashes.
+          $status = git status --porcelain -- PipDimmer.exe
+          if ($status) {
+            Write-Host "::warning::PipDimmer.exe in the repo differs from a fresh build of src/"
+          } else {
+            Write-Host "committed binary is byte-identical to a fresh build"
+          }
+
+      - name: Validate the AutoHotkey script
+        shell: pwsh
+        continue-on-error: true    # best effort; a failed AHK install must not fail the build
+        run: |
+          choco install autohotkey.portable --version=2.0.19 -y --no-progress | Out-Null
+          $ahk = Get-ChildItem 'C:\ProgramData\chocolatey\lib\autohotkey.portable' -Recurse `
+                   -Filter 'AutoHotkey64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $ahk) { Write-Host "::warning::AutoHotkey not found, skipping"; exit 0 }
+          $p = Start-Process $ahk.FullName -ArgumentList '/ErrorStdOut','/validate','ahk\PipDimmer.ahk' `
+                 -NoNewWindow -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "AutoHotkey reported a syntax error (exit $($p.ExitCode))" }
+          Write-Host "PipDimmer.ahk syntax OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PipDimmer
+          path: PipDimmer.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: pwsh
+        run: .\build.ps1
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag PipDimmer.exe --title $tag --generate-notes

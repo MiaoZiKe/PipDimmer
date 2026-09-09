@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PipDimmer PiP fixture</title>
+<style>
+  html,body{margin:0;height:100%;background:#12141a;color:#e8ecf4;
+            font:16px/1.5 "Segoe UI",system-ui,sans-serif;
+            display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+            cursor:pointer;user-select:none}
+  #status{font-size:14px;color:#8b93a7}
+  video{width:320px;height:180px;background:#000;border-radius:8px}
+</style>
+
+<h2 id="hd">click anywhere to enter picture-in-picture</h2>
+<video id="v" muted playsinline autoplay></video>
+<div id="status">initialising…</div>
+
+<script>
+  // A canvas-backed MediaStream gives us a real, playing <video> with no media file and no
+  // network access, so the PiP window this opens is structurally identical to a normal
+  // video PiP window. That makes the test suite reproducible on any machine.
+  const cv = document.createElement('canvas');
+  cv.width = 640; cv.height = 360;
+  const ctx = cv.getContext('2d');
+  let t = 0;
+  setInterval(() => {
+    t += 0.04;
+    ctx.fillStyle = '#101018';
+    ctx.fillRect(0, 0, 640, 360);
+    ctx.fillStyle = `hsl(${(t * 40) % 360} 80% 60%)`;
+    ctx.beginPath();
+    ctx.arc(320 + Math.cos(t) * 180, 180 + Math.sin(t * 1.3) * 110, 46, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '28px monospace';
+    ctx.fillText('PipDimmer fixture', 170, 330);
+  }, 33);
+
+  const v = document.getElementById('v');
+  const status = document.getElementById('status');
+  v.srcObject = cv.captureStream(30);
+
+  function log(m) { status.textContent = m; }
+
+  v.play().then(() => log('video playing — click to request PiP'))
+          .catch(e => log('play failed: ' + e));
+
+  // requestPictureInPicture() needs a user gesture, which is why the harness sends a real
+  // click via SendInput rather than calling this on load. document.title is the channel the
+  // harness reads to find out whether the request succeeded.
+  async function go() {
+    try {
+      if (!document.pictureInPictureEnabled) { log('PiP not enabled in this browser'); return; }
+      if (document.pictureInPictureElement) { log('already in PiP'); return; }
+      if (v.readyState < 1) { log('video not ready yet (readyState ' + v.readyState + ')'); return; }
+      await v.requestPictureInPicture();
+      log('PiP OPEN');
+      document.title = 'PIP-OPEN';
+    } catch (e) {
+      log('requestPictureInPicture failed: ' + e.name + ' ' + e.message);
+      document.title = 'PIP-FAIL';
+    }
+  }
+
+  document.addEventListener('click', go);
+  document.addEventListener('keydown', go);
+</script>

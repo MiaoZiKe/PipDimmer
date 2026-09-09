@@ -1,0 +1,23 @@
+# PipDimmer.exe is committed on purpose -- it is 45 KB and the whole point of the tool is
+# that you can download one file and run it. Everything below is local runtime state or
+# editor noise.
+
+# Runtime state normally lives in %APPDATA%\PipDimmer, but ignore stray local copies.
+settings.ini
+log.txt
+
+# Test fixture leftovers
+tests/chromeprofile/
+tests/*.png
+
+# Build intermediates
+*.pdb
+*.obj
+
+# Editor / OS
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
