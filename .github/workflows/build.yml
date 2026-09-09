@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No SDK setup step on purpose: the whole point is that this builds with the C#
       # compiler that already ships inside Windows, which the runner image also has.
@@ -29,37 +29,44 @@ jobs:
           $f = Get-Item .\PipDimmer.exe
           Write-Host ("PipDimmer.exe: {0:N0} bytes" -f $f.Length)
           if ($f.Length -lt 20000) { throw "binary is suspiciously small ($($f.Length) bytes)" }
-          # A winexe built for x64 must have the PE magic and no console subsystem surprises.
           $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
           if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "not a PE image" }
 
-      - name: Check the committed exe matches the sources
+      - name: Compare the committed binary with a fresh build
         shell: pwsh
         run: |
-          # build.ps1 overwrites PipDimmer.exe in place, so if the checked-in binary were
-          # stale git would now report it as modified. Timestamps inside a PE image change
-          # on every build, so compare sizes rather than hashes.
-          $status = git status --porcelain -- PipDimmer.exe
-          if ($status) {
-            Write-Host "::warning::PipDimmer.exe in the repo differs from a fresh build of src/"
+          # A fresh build is never byte-identical -- the compiler stamps a new MVID and
+          # timestamp into the PE every time -- so hashing would warn on every single run and
+          # train everyone to ignore it. Size is stable, and a size change is a real signal
+          # that the committed exe no longer matches src/.
+          $fresh = (Get-Item .\PipDimmer.exe).Length
+          $committed = [int](git cat-file -s (git rev-parse 'HEAD:PipDimmer.exe'))
+          Write-Host "committed: $committed bytes, fresh build: $fresh bytes"
+          if ($committed -ne $fresh) {
+            Write-Host "::warning::PipDimmer.exe in the repo looks stale - run build.ps1 and commit the result"
           } else {
-            Write-Host "committed binary is byte-identical to a fresh build"
+            Write-Host "committed binary matches a fresh build of src/"
           }
 
       - name: Validate the AutoHotkey script
         shell: pwsh
-        continue-on-error: true    # best effort; a failed AHK install must not fail the build
+        continue-on-error: true    # a download hiccup must not fail the build
         run: |
-          choco install autohotkey.portable --version=2.0.19 -y --no-progress | Out-Null
-          $ahk = Get-ChildItem 'C:\ProgramData\chocolatey\lib\autohotkey.portable' -Recurse `
-                   -Filter 'AutoHotkey64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $ahk) { Write-Host "::warning::AutoHotkey not found, skipping"; exit 0 }
-          $p = Start-Process $ahk.FullName -ArgumentList '/ErrorStdOut','/validate','ahk\PipDimmer.ahk' `
+          # Downloading the official zip is more predictable than a package manager: it needs
+          # no install step and the layout is known.
+          $ver = '2.0.19'
+          $zip = Join-Path $env:RUNNER_TEMP 'ahk.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'ahk'
+          Invoke-WebRequest "https://www.autohotkey.com/download/2.0/AutoHotkey_$ver.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath $dir -Force
+          $exe = Get-ChildItem $dir -Recurse -Filter 'AutoHotkey64.exe' | Select-Object -First 1
+          if (-not $exe) { throw "AutoHotkey64.exe not found in the downloaded zip" }
+          $p = Start-Process $exe.FullName -ArgumentList '/ErrorStdOut', '/validate', 'ahk\PipDimmer.ahk' `
                  -NoNewWindow -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "AutoHotkey reported a syntax error (exit $($p.ExitCode))" }
-          Write-Host "PipDimmer.ahk syntax OK"
+          Write-Host "PipDimmer.ahk syntax OK (AutoHotkey $ver)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: PipDimmer
           path: PipDimmer.exe
@@ -69,14 +76,26 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
       - name: Build
         shell: pwsh
         run: .\build.ps1
+
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          gh release create $tag PipDimmer.exe --title $tag --generate-notes
+          $tag = '${{ github.ref_name }}'
+          # The tag may already carry a release -- `gh release create` run locally creates the
+          # tag, which then triggers this workflow. Creating it again would fail, so attach the
+          # freshly built binary to whichever release is there.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag already exists, replacing its binary"
+            gh release upload $tag PipDimmer.exe --clobber
+          } else {
+            Write-Host "creating release $tag"
+            gh release create $tag PipDimmer.exe --title $tag --generate-notes
+          }
